@@ -608,17 +608,56 @@
 
   <div class="toast-host" id="toastHost" aria-live="polite" aria-atomic="false"></div>
 
+  <!-- Firebase SDK (compat version — works without a bundler) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
   <script>
   'use strict';
 
   /* ╔══════════════════════════════════════════════════════════════════════╗
      ║  CONFIG — THE ONLY BLOCK YOU EVER NEED TO EDIT                      ║
+     ╚══════════════════════════════════════════════════════════════════════╝
+
+     FIREBASE SETUP (one-time, free):
+     1. Go to https://console.firebase.google.com  → "Add project" (call it ottawa-rp)
+     2. In your new project → "Firestore Database" → "Create database" → Start in TEST mode
+     3. Click the gear ⚙ → "Project settings" → scroll to "Your apps" → click </> (Web)
+     4. Register the app, then COPY the firebaseConfig object shown
+     5. Paste those values into FIREBASE_CFG below
+     6. Done — all data is now shared across every device!
+
      ╚══════════════════════════════════════════════════════════════════════╝ */
+
+  /* 🔥 PASTE YOUR FIREBASE CONFIG HERE */
+  const FIREBASE_CFG = {
+    apiKey            : "PASTE_YOUR_apiKey_HERE",
+    authDomain        : "PASTE_YOUR_authDomain_HERE",
+    projectId         : "PASTE_YOUR_projectId_HERE",
+    storageBucket     : "PASTE_YOUR_storageBucket_HERE",
+    messagingSenderId : "PASTE_YOUR_messagingSenderId_HERE",
+    appId             : "PASTE_YOUR_appId_HERE",
+  };
+
+  /* Initialise Firebase — only when config is filled in */
+  const _firebaseReady = FIREBASE_CFG.projectId && FIREBASE_CFG.projectId !== 'PASTE_YOUR_projectId_HERE';
+  let _db = null, DOC_DATA = null, DOC_TYPES = null;
+  if (_firebaseReady) {
+    try {
+      firebase.initializeApp(FIREBASE_CFG);
+      _db       = firebase.firestore();
+      DOC_DATA  = _db.collection('ottawa_rp').doc('wl_data');
+      DOC_TYPES = _db.collection('ottawa_rp').doc('wl_types');
+    } catch(e) {
+      console.error('[Ottawa RP] Firebase init failed:', e);
+    }
+  }
+
   const CFG = {
     /* Admin password — only you should know this */
     adminPass  : '192837465',
 
-    /* localStorage key — change if you run multiple sites on same domain */
+    /* (storageKey no longer used — kept for reference) */
     storageKey : 'ottawa_rp_wl_v5',
 
     /* Branding */
@@ -692,22 +731,53 @@
   /* ════════════════════════════════════════════════════════════
      INIT
      ════════════════════════════════════════════════════════════ */
-  function init() {
+  async function init() {
     document.getElementById('brandName').textContent = CFG.serverName;
     document.getElementById('brandSub').textContent  = CFG.serverSub;
     document.getElementById('pageTitle').textContent = CFG.pageTitle;
     document.getElementById('pageDesc').textContent  = CFG.pageDesc;
     document.title = CFG.serverName + ' — WL Database';
 
-    try { const r = localStorage.getItem(CFG.storageKey+'_types'); wlTypes = r ? JSON.parse(r) : [...CFG.defaultWLTypes]; }
-    catch { wlTypes = [...CFG.defaultWLTypes]; }
-    if (!Array.isArray(wlTypes) || !wlTypes.length) wlTypes = [...CFG.defaultWLTypes];
+    /* Show loading indicator */
+    const tbody = document.getElementById('tableBody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted);">Loading from database…</td></tr>';
 
-    try { const r = localStorage.getItem(CFG.storageKey); db = r ? JSON.parse(r) : buildSeed(); }
-    catch { db = buildSeed(); }
-    if (!Array.isArray(db) || !db.length) db = buildSeed();
+    /* Check if Firebase is configured */
+    if (!_firebaseReady || !DOC_DATA) {
+      console.warn('[Ottawa RP] Firebase not configured — falling back to localStorage.');
+      try { const r = localStorage.getItem(CFG.storageKey+'_types'); wlTypes = r ? JSON.parse(r) : [...CFG.defaultWLTypes]; }
+      catch { wlTypes = [...CFG.defaultWLTypes]; }
+      if (!Array.isArray(wlTypes) || !wlTypes.length) wlTypes = [...CFG.defaultWLTypes];
+      try { const r = localStorage.getItem(CFG.storageKey); db = r ? JSON.parse(r) : buildSeed(); }
+      catch { db = buildSeed(); }
+      if (!Array.isArray(db)) db = buildSeed();
+      migrateEntries();
+      renderFilterSelect(); renderTable(); renderStats(); stampTime(); renderColorPicker();
+      toast('⚠ Firebase not set up yet — data is device-only. See source code for setup steps.', 'error', 6000);
+      return;
+    }
 
-    /* Migrate old entries */
+    /* Load from Firestore */
+    try {
+      const [typesSnap, dataSnap] = await Promise.all([DOC_TYPES.get(), DOC_DATA.get()]);
+      wlTypes = (typesSnap.exists && Array.isArray(typesSnap.data().list))
+        ? typesSnap.data().list : [...CFG.defaultWLTypes];
+      if (!wlTypes.length) wlTypes = [...CFG.defaultWLTypes];
+      db = (dataSnap.exists && Array.isArray(dataSnap.data().list))
+        ? dataSnap.data().list : buildSeed();
+      if (!Array.isArray(db)) db = buildSeed();
+    } catch(err) {
+      console.error('[Ottawa RP] Firestore load error:', err);
+      toast('Could not connect to database. Check your Firebase config.', 'error', 6000);
+      db = buildSeed(); wlTypes = [...CFG.defaultWLTypes];
+    }
+
+    migrateEntries();
+    await persistAll();
+    renderFilterSelect(); renderTable(); renderStats(); stampTime(); renderColorPicker();
+  }
+
+  function migrateEntries() {
     db.forEach(e => {
       if (!Array.isArray(e.wlTypes))           e.wlTypes = e.wlType ? [e.wlType] : [];
       if (!e.strikes)                          e.strikes = {};
@@ -716,13 +786,6 @@
       if (e.hasVerifiedBadge === undefined)    e.hasVerifiedBadge = false;
       if (e.isBanned         === undefined)    e.isBanned         = false;
     });
-
-    persistAll();
-    renderFilterSelect();
-    renderTable();
-    renderStats();
-    stampTime();
-    renderColorPicker();
   }
 
   function buildSeed() {
@@ -747,9 +810,24 @@
   /* ════════════════════════════════════════════════════════════
      PERSIST
      ════════════════════════════════════════════════════════════ */
-  function persistAll() {
-    localStorage.setItem(CFG.storageKey,          JSON.stringify(db));
-    localStorage.setItem(CFG.storageKey+'_types', JSON.stringify(wlTypes));
+  async function persistAll() {
+    if (!_firebaseReady || !DOC_DATA) {
+      /* Fallback to localStorage during setup */
+      try {
+        localStorage.setItem(CFG.storageKey,          JSON.stringify(db));
+        localStorage.setItem(CFG.storageKey+'_types', JSON.stringify(wlTypes));
+      } catch(_) {}
+      return;
+    }
+    try {
+      await Promise.all([
+        DOC_DATA .set({ list: db }),
+        DOC_TYPES.set({ list: wlTypes }),
+      ]);
+    } catch(err) {
+      console.error('[Ottawa RP] Firestore save error:', err);
+      toast('Save failed — check Firestore rules.', 'error');
+    }
   }
 
   /* ════════════════════════════════════════════════════════════
@@ -1064,7 +1142,7 @@
   /* ════════════════════════════════════════════════════════════
      ADD ENTRY
      ════════════════════════════════════════════════════════════ */
-  function addEntry() {
+  async function addEntry() {
     if (!isAdmin) return;
 
     if (!pendingRoblox) { toast('Please do a Roblox lookup first.', 'error'); return; }
@@ -1099,7 +1177,7 @@
     };
 
     db.unshift(entry);
-    persistAll();
+    await persistAll();
     renderTable();
     renderStats();
     stampTime();
@@ -1127,7 +1205,7 @@
   /* ════════════════════════════════════════════════════════════
      REMOVE ENTRY
      ════════════════════════════════════════════════════════════ */
-  function removeEntry(id) {
+  async function removeEntry(id) {
     if (!isAdmin) return;
     const entry = db.find(e => e.id === id);
     if (!entry) return;
@@ -1136,12 +1214,12 @@
       row.classList.add('row-removing');
       setTimeout(() => {
         db = db.filter(e => e.id !== id);
-        persistAll(); renderTable(); renderStats(); stampTime();
+        await persistAll(); renderTable(); renderStats(); stampTime();
         toast(entry.username + ' removed from WL database.', 'info');
       }, 190);
     } else {
       db = db.filter(e => e.id !== id);
-      persistAll(); renderTable(); renderStats();
+      await persistAll(); renderTable(); renderStats();
     }
   }
 
@@ -1257,7 +1335,7 @@
   }
 
   /* ── STRIKES — uses typeIdx + _currentProfileTypes for safe typeName lookup ── */
-  function toggleStrike(entryId, typeIdx, pipIndex) {
+  async function toggleStrike(entryId, typeIdx, pipIndex) {
     if (!isAdmin) return;
     const entry = db.find(e => e.id === entryId);
     if (!entry) return;
@@ -1273,7 +1351,7 @@
     } else {
       entry.strikes[typeName] = pipIndex + 1;
     }
-    persistAll();
+    await persistAll();
     openProfile(entryId);  // re-render modal (also resets _currentProfileTypes)
     renderTable();
     const newCount = entry.strikes[typeName];
@@ -1387,12 +1465,12 @@
     toast('"' + selected + '" added to ' + entry.username, 'success');
   }
 
-  function saveProfileEdit() {
+  async function saveProfileEdit() {
     if (!profileEditMode || !openProfileId) return;
     const entry = db.find(e => e.id === openProfileId);
     if (!entry) return;
 
-    persistAll();
+    await persistAll();
     renderTable();
     renderStats();
     stampTime();
@@ -1467,21 +1545,21 @@
     if (el) el.classList.remove('open');
   }
 
-  function addWLType() {
+  async function addWLType() {
     if (!isAdmin) return;
     const inp  = document.getElementById('newWLName');
     const name = inp.value.trim();
     if (!name) { toast('Enter a name for the new WL type.', 'error'); return; }
     if (wlTypes.some(t => t.name.toLowerCase() === name.toLowerCase())) { toast('That WL type name already exists.', 'error'); return; }
     wlTypes.push({ name, color: newTypeColor });
-    persistAll();
+    await persistAll();
     inp.value    = '';
     newTypeColor = 'accent';
     renderColorPicker(); renderFilterSelect(); renderWLPicker(); renderWLTypesList(); renderStats();
     toast('"' + name + '" WL type created.', 'success');
   }
 
-  function deleteWLType(idx) {
+  async function deleteWLType(idx) {
     if (!isAdmin) return;
     const type  = wlTypes[idx];
     if (!type) return;
@@ -1491,14 +1569,14 @@
       db.forEach(e => { if (Array.isArray(e.wlTypes)) e.wlTypes = e.wlTypes.filter(w => w !== type.name); });
     }
     wlTypes.splice(idx, 1);
-    persistAll(); renderFilterSelect(); renderWLPicker(); renderWLTypesList(); renderTable(); renderStats();
+    await persistAll(); renderFilterSelect(); renderWLPicker(); renderWLTypesList(); renderTable(); renderStats();
     toast('"' + type.name + '" deleted.', 'info');
   }
 
-  function changeWLTypeColor(idx, color) {
+  async function changeWLTypeColor(idx, color) {
     if (!isAdmin) return;
     wlTypes[idx].color = color;
-    persistAll(); renderWLTypesList(); renderTable(); renderStats();
+    await persistAll(); renderWLTypesList(); renderTable(); renderStats();
     toast('Badge colour updated.', 'success');
   }
 
