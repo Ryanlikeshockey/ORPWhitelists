@@ -773,7 +773,6 @@
     }
 
     migrateEntries();
-    await persistAll();
     renderFilterSelect(); renderTable(); renderStats(); stampTime(); renderColorPicker();
   }
 
@@ -1212,7 +1211,7 @@
     const row = document.getElementById('row-' + id);
     if (row) {
       row.classList.add('row-removing');
-      setTimeout(() => {
+      setTimeout(async () => {
         db = db.filter(e => e.id !== id);
         await persistAll(); renderTable(); renderStats(); stampTime();
         toast(entry.username + ' removed from WL database.', 'info');
